@@ -1,0 +1,230 @@
+#########################################################
+#       Guacamole and pam installation playbook         #
+#       Maintainer: Majid Mortazavi                     #
+#       Douran Co. LTD                                  #
+#########################################################
+
+---
+- name: Install Guacamole and Pam
+  hosts: PamServers
+  remote_user: root
+
+vars:
+  nexus_url: "YOUR NEXUS URL"
+  
+  tasks:
+    - name: Set time and date for server
+      community.general.timezone:
+        name: XX/YY
+
+    - name: Add Nexus Repo to source.list
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list
+        mode: "0644"
+        content: |
+          deb [trusted=yes] {{ nexus_url }}apt-proxy/ jammy main restricted universe multiverse
+          deb [trusted=yes] {{ nexus_url }}apt-proxy/ jammy-updates main restricted universe multiverse
+          deb [trusted=yes] {{ nexus_url }}apt-proxy/ jammy-security main restricted universe multiverse
+
+    - name:  Update apt repo and Install prerequisites
+      ansible.builtin.apt:
+        pkg:
+        - gcc
+        - nano
+        - vim
+        - curl
+        - wget
+        - g++
+        - libcairo2-dev
+        - libjpeg-turbo8-dev
+        - libpng-dev
+        - libtool-bin
+        - libossp-uuid-dev
+        - libavcodec-dev
+        - libavformat-dev
+        - libavutil-dev
+        - libswscale-dev
+        - build-essential
+        - libpango1.0-dev
+        - libssh2-1-dev
+        - libssh2-1
+        - libvncserver-dev
+        - libtelnet-dev
+        - libpulse-dev
+        - libvorbis-dev
+        - libwebp-dev
+        - mysql-server
+        - freerdp2-dev                # This package must add from Remina repository.
+        - freerdp2-x11                # This package must add from Remina repository.
+        - default-jdk
+        - tomcat9
+        - tomcat9-admin
+        - tomcat9-common
+        - tomcat9-user
+        - python3-pip
+        - libmysqlclient21
+        - libzip-dev
+        update_cache: yes
+
+    - name: Configure pip to use Nexus (system-wide)   #If you dont have PYPI nexus repo, you can comment these lines.
+      ansible.builtin.copy:
+        dest: /etc/pip.conf
+        mode: "0644"
+        content: |
+          [global]
+          index-url = {{ nexus_url }}pypi-proxy/simple
+          trusted-host = 192.168.100.194                #If your nexus dosent use https, or selfsigned ssl.
+          timeout = 60
+
+    - name: PIP3 install PyMySQL
+      ansible.builtin.pip:
+        name: PyMySQL
+        executable: pip3
+      tags:
+
+    - name: Start service of Apache Tomcat 9
+      ansible.builtin.service:
+        name: tomcat9
+        enabled: yes
+        state: started
+
+    - name: Open port 8080 for apache
+      community.general.ufw:
+        rule: allow
+        port: 8080
+        proto: tcp
+
+    - name: unarchive guacamole server
+      ansible.builtin.unarchive:
+        src: ./guacamole-server-1.5.5.tar.gz
+        dest: /root/
+
+    - name: Configure command for Guacamole server
+      ansible.builtin.shell:
+        chdir: /root/guacamole-server-1.5.5
+        cmd: ./configure --with-init-dir=/etc/init.d
+
+    - name: Make command for Guacamole server
+      community.general.make:
+        chdir: /root/guacamole-server-1.5.5
+
+    - name: Make Install command for Guacamole server
+      community.general.make:
+        chdir: /root/guacamole-server-1.5.5
+        target: install
+
+    - name: ldconfig command for Guacamole server
+      ansible.builtin.shell:
+        chdir: /root/guacamole-server-1.5.5
+        cmd: ldconfig
+
+    - name: Make directories (extensions,lib)
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - /etc/guacamole/
+        - /etc/guacamole/extensions
+        - /etc/guacamole/lib
+
+    - name: Create file guacd.conf
+      ansible.builtin.copy:
+        src: ./guacd.conf
+        dest: /etc/guacamole/guacd.conf
+        follow: yes
+
+    - name: Guacamole service enable and restart
+      ansible.builtin.service:
+        name: guacd
+        enabled: yes
+        state: started
+
+    - name: Remove ROOT dir of tomcat
+      file:
+        path: /var/lib/tomcat9/webapps/ROOT
+        state: absent
+
+    - name: Install Guacamole client
+      ansible.builtin.copy:
+        src: ./guacamole-1.5.5.war
+        dest: /var/lib/tomcat9/webapps/ROOT.war
+        follow: yes
+
+    - name: Config Guacamole Server
+      ansible.builtin.shell:
+        cmd: "{{ item }}"
+      loop:
+        - echo "GUACAMOLE_HOME=/etc/guacamole" | sudo tee -a /etc/default/tomcat
+        - echo "export GUACAMOLE_HOME=/etc/guacamole" | sudo tee -a /etc/profile
+      tags: guacd
+
+    - name: Create file guacamole.properties
+      ansible.builtin.copy:
+        src: ./guacamole.properties
+        dest: /etc/guacamole/guacamole.properties
+
+    - name: Enable mysql service
+      ansible.builtin.service:
+        name: mysql
+        enabled: yes
+        state: started
+
+    - name: MySQL Connector
+      ansible.builtin.copy:
+        src: ./mysql-connector-j-8.3.0.jar
+        dest: /etc/guacamole/lib/
+
+    - name: JDBC Auth must download and install
+      ansible.builtin.copy:
+        src: ./guacamole-auth-jdbc-mysql-1.5.3.jar
+        dest: /etc/guacamole/extensions/
+
+    - name: Enable remote login to mysql
+      lineinfile:
+         path: /etc/mysql/mysql.conf.d/mysqld.cnf
+         regexp: '^bind-address'
+         line: 'bind-address = 0.0.0.0'
+         backup: yes
+
+    - name: Create Database
+      mysql_db:
+        name: guacamole_db
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Create Database user
+      mysql_user:
+        name: guacamole_user
+        password: changeit
+        priv: '*.*:ALL'
+        host: '%'
+        state: present
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Copy the create tables query files
+      ansible.builtin.unarchive:
+        src: ./guacamole-auth-jdbc-1.5.3.tar.gz
+        dest: /tmp
+
+    - name: Create Guacamole tables
+      mysql_db:
+        name: guacamole_db
+        target: /tmp/mysql/schema/001-create-schema.sql
+        state: import
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Create Guacamole tables 2
+      mysql_db:
+        name: guacamole_db
+        target: /tmp/mysql/schema/002-create-admin-user.sql
+        state: import
+        login_unix_socket: /run/mysqld/mysqld.sock
+
+    - name: Restart services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - "guacd"
+        - "tomcat9"
